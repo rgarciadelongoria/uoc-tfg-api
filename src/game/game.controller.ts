@@ -70,4 +70,12 @@ export class GameController {
     @Param('code') code: ValidCodes) {
     return this.gameService.taskDownloadData(code, userToken);
   }
+
+  @Get('ln/:gameId/:number')
+  @Auth()
+  checkPrizeByNumberLN(
+    @Param('gameId') gameId: string,
+    @Param('number') number: string) {
+    return this.gameService.checkPrizeByNumberLN(gameId, number);
+  }
 }

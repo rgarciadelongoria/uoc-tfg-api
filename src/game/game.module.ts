@@ -10,13 +10,13 @@ import { Ticket, TicketSchema } from '../ticket/entities/ticket.entity';
 import { TicketService } from '../ticket/ticket.service';
 import { JwtModule } from '@nestjs/jwt';
 import { JwtStrategy } from '../user/strategies/jwt.strategy';
-import { TaskService } from '../task/task.service';
+import { LnTaskService } from '../task/ln-task.service';
 import { HttpModule } from '@nestjs/axios';
 import { Push, PushSchema } from '../push/entities/push.entity';
 
 @Module({
   controllers: [GameController],
-  providers: [GameService, UserService, TicketService, JwtStrategy, TaskService],
+  providers: [GameService, UserService, TicketService, JwtStrategy, LnTaskService],
   imports: [
     MongooseModule.forFeature([
       {

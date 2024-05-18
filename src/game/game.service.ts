@@ -9,9 +9,9 @@ import { UpdateGameDto } from './dto/update-game.dto';
 import { isAdminOrSameUser, isCorrectCode } from '../common/utils/utils';
 import { ValidCodes } from './enums/valid-codes.enum';
 import { ValidRoles } from '../user/enums/valid-roles.enum';
-import { LNGameDataInfo, LNGameDataInfoPrize } from './interfaces/game-data.interface';
+import { GameDataInfo, LNGameDataInfoPrize } from './interfaces/game-data.interface';
 import { ResponsePrize } from './interfaces/response-prize.interface';
-import { TaskService } from '../task/task.service';
+import { LnTaskService } from '../task/ln-task.service';
 import { FindDto } from './dto/find.dto';
 import { FindDto as TicketFindDto } from '../ticket/dto/find.dto';
 import { PaginationDto } from '../common/dto/pagination.dto';
@@ -28,7 +28,7 @@ export class GameService {
     private readonly gameModel: Model<Game>,
     @InjectModel(Ticket.name)
     private readonly ticketModel: Model<Ticket>,
-    private readonly taskService: TaskService
+    private readonly lnTaskService: LnTaskService
   ) {}
 
   /*
@@ -54,20 +54,30 @@ export class GameService {
   }
 
   async findAll(findDto: FindDto) {
-    const { 
+    const {
       limit = 10,
       offset = 0,
       code = '',
-      onlyWithPrizes = false
+      onlyWithPrizes = false,
+      minDays = 0,
+      maxDays = 0
     } = findDto;
 
-    let query = this.gameModel.find()
+    let query = this.gameModel.find({}, { 'data.info.completePrizesListRaw': 0 })
       .sort({ date: -1 })
       .skip(offset)
       .limit(limit);
 
     if (code) {
       query = query.where({ code: code.toLocaleLowerCase().trim() });
+    }
+
+    if (minDays) {
+      query = query.where({ date: { $lte: new Date(Date.now() - minDays * 24 * 60 * 60 * 1000) } });
+    }
+
+    if (maxDays) {
+      query = query.where({ date: { $gte: new Date(Date.now() - maxDays * 24 * 60 * 60 * 1000) } });
     }
 
     if (onlyWithPrizes) {
@@ -92,7 +102,7 @@ export class GameService {
 
     // Code
     if (!game) {
-      game = await this.gameModel.findOne({ code: term.toLocaleLowerCase().trim() }).exec();
+      game = await this.gameModel.findOne({ code: term.toLocaleLowerCase().trim() }, { 'data.info.completePrizesListRaw': 0 }).exec();
     }
 
     if (!game) {
@@ -194,7 +204,7 @@ export class GameService {
       throw new UnauthorizedException(`You can't check this ticket`);
     }
 
-    const game = await this.gameModel.findOne({ date: ticket.date, code: ticket.code }).exec();
+    const game = await this.gameModel.findOne({ date: ticket.date, code: ticket.code }, { 'data.info.completePrizesListRaw': 0 }).exec();
 
     if (!game && !checkingAllTickets) {
       throw new NotFoundException(`Game not found for ticket date or code: ${ticket.date} - ${ticket.code}`);
@@ -207,14 +217,8 @@ export class GameService {
       return noGamePrize;
     }
 
-    const prizes = game.data?.info?.prizes;
-
-    if (!prizes) {
-      throw new InternalServerErrorException(`Invalid game data: ${game}`);
-    }
-
-    return this.getPrizeResultByCode(game, ticket, prizes);
-  }
+    return this.getPrizeResultByCode(game, ticket);
+  } 
 
   async taskDownloadData(code: ValidCodes, userToken: User) {
     if (!userToken.roles?.includes(ValidRoles.ADMIN)) {
@@ -224,7 +228,7 @@ export class GameService {
     
     // LN
     } else if (code === ValidCodes.LOTERIA_NACIONAL) {
-      this.taskService.launchTaskLN();
+      this.lnTaskService.launchTaskLN();
       return { message: `Task launched for code: ${code}` };
 
     } else {
@@ -236,12 +240,12 @@ export class GameService {
   General logic
   */
 
-  private getPrizeResultByCode(game: Game, ticket: Ticket, prizes: LNGameDataInfoPrize[]) {
+  private getPrizeResultByCode(game: Game, ticket: Ticket) {
     let prize: LNGameDataInfoPrize; // Multiple intergaces by game code
 
     // LN
     if (game.code === ValidCodes.LOTERIA_NACIONAL) {
-      prize = this.getPrizeResultByCodeLN(game, ticket, prizes);
+      prize = this.getPrizeResultByCodeLN(game, ticket);
     }
 
     const result: ResponsePrize = {
@@ -282,17 +286,36 @@ export class GameService {
   LN logic
   */
 
+  async checkPrizeByNumberLN(gameId: string, number: string): Promise<LNGameDataInfoPrize[]> {
+    try {
+      const game = await this.gameModel.findOne({ 'data.info.gameId': gameId }, { 'data.info.completePrizesListRaw': 1 }).exec();
+      const prizes = JSON.parse(game.data?.info?.completePrizesListRaw || '[]') as LNGameDataInfoPrize[];
+      const results = prizes.filter((prize) => prize.number.substring(1).toLowerCase().indexOf(number) > -1);
+
+      if (prizes.length && !results.length) {
+        results.push({
+          number: '0' + number,
+          quantity: 0
+        });
+      }
+
+      return results
+    } catch (error) {
+      this.handleException(error);
+    }
+  }
+
   private checkCorrectGameDataInfoPrizesLN(prices: LNGameDataInfoPrize[]) {
     return (prices.findIndex(el => {
       return (typeof el.number === 'string' && typeof el.quantity === 'number');
     }) > -1);
   }
 
-  private checkCorrectGameDataInfoLN(info: LNGameDataInfo) {
+  private checkCorrectGameDataInfoLN(info: GameDataInfo) {
     if (info.prizes) {
       if (!Array.isArray(info.prizes)) {
         throw new BadRequestException(`Invalid info, prizes is not an array: ${JSON.stringify(info)}`)
-      } else if (!this.checkCorrectGameDataInfoPrizesLN(info.prizes)) {
+      } else if (!this.checkCorrectGameDataInfoPrizesLN(info.prizes as LNGameDataInfoPrize[])) {
         throw new BadRequestException(`Invalid info, prize incorrect format: ${JSON.stringify(info)}`)
       }
     } else {
@@ -300,14 +323,11 @@ export class GameService {
     }
   }
 
-  private getPrizeResultByCodeLN(game: Game, ticket: Ticket, prizes: LNGameDataInfoPrize[]): LNGameDataInfoPrize {
-    const ticketNumber = ticket.data?.info?.number;
-    const hasPrize = prizes.find(el => {
-      const numberA = el.number;
-      const numberB = ticketNumber;
-      const numberC = ticketNumber.slice(numberB.length - numberA.length);
-      return el.number === numberC
-    });
+  private getPrizeResultByCodeLN(game: Game, ticket: Ticket): LNGameDataInfoPrize {
+    const ticketNumber = '0' + ticket.data?.info?.number;
+    const prizes = JSON.parse(game.data?.info?.completePrizesListRaw || '[]') as LNGameDataInfoPrize[];
+    const hasPrize = prizes.find(el => el.number === ticketNumber);
+
     return {
       number: ticket.data.info.number,
       quantity: hasPrize?.quantity || 0

@@ -144,6 +144,9 @@ export class UserService {
       throw new UnauthorizedException(`Invalid credentials`);
     }
 
+    user.updatedAt = new Date();
+    user.save();
+
     return {
       user,
       token: this.getJwtToken({ id: user.id })

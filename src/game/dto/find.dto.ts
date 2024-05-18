@@ -8,4 +8,8 @@ export class FindDto extends PaginationDto {
     @IsOptional()
     @IsBoolean()
     onlyWithPrizes: boolean;
+    @IsOptional()
+    minDays: number;
+    @IsOptional()
+    maxDays: number;
 }

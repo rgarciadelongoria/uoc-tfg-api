@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
 import { Document } from 'mongoose';
+import { now } from 'mongoose';
 
 @Schema()
 export class Uuid extends Document {
@@ -14,6 +15,11 @@ export class Uuid extends Document {
         index: true,
     })
     user: string;
+
+    @Prop({default: now()})
+    createdAt: Date;
+    @Prop({default: now()})
+    updatedAt: Date;
 }
 
 export const UuidSchema = SchemaFactory.createForClass(Uuid);

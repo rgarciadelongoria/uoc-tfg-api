@@ -15,8 +15,8 @@ import { GameNames } from '../game/game.service';
 const cheerio = require('cheerio');
 
 @Injectable()
-export class TaskService {
-    private readonly logger = new Logger(TaskService.name);
+export class LnTaskService {
+    private readonly logger = new Logger(LnTaskService.name);
     private readonly maxGamesWithoutPrizes = 10;
     private hasWorking = false;
 
@@ -79,13 +79,14 @@ export class TaskService {
         // Get latest game by date with prizes
         let nextGameWithPrizes = await this.gameModel.findOne({
             $and: [
+                { 'code': ValidCodes.LOTERIA_NACIONAL },
                 { 'data.info.raw': { $exists: true } },
                 { 'data.info.prizes': { $exists: true, $ne: [] } },
             ]
         }).sort({ date: -1 }).exec();
 
         if (!nextGameWithPrizes) { // Nothing found
-            const defaultId = '1209609064'
+            const defaultId = '1233209027'; // '1209609064' First old number 2023
             this.logger.error(`[LN]: Next game with prizes not found, using default game id: ${defaultId}`);
             return defaultId;
         } else {
@@ -112,6 +113,7 @@ export class TaskService {
         // Get latest game by date without prizes
         let nextGameWithoutPrizes = await this.gameModel.findOne({
             $and: [
+                { 'code': ValidCodes.LOTERIA_NACIONAL },
                 { 'data.info.raw': { $exists: true } },
                 { 'data.info.prizes': { $exists: true, $eq: [] } },
             ]
@@ -139,19 +141,12 @@ export class TaskService {
     }
 
     private async findGameDataByGameId (gameId: string) {
-        // const urlData1 = `https://www.loteriasyapuestas.es/servicios/resultados2?idsorteo=${gameId}`;
-        // const { data: data1 } = await firstValueFrom(this.httpService.get(urlData1));
-        // const urlData2 = `https://www.loteriasyapuestas.es/servicios/premioDecimoWeb?idsorteo=${gameId}`;
-        // const { data: data2 } = await firstValueFrom(this.httpService.get(urlData2));
-        // return { data1, data2 };
-
-
         var requestOptions = {
             method: 'GET',
             redirect: 'follow'
         };
 
-        // Important: Don´t use this data
+        // Important: Don´t use this data, sometimes is incomplete or incorrect
         const urlData1 = await fetch(`https://www.loteriasyapuestas.es/servicios/resultados1?idsorteo=${gameId}`, (requestOptions as any))
         const data1 = JSON.parse(await urlData1.text());
         // This, data2 is the best data to get the date of the game
@@ -159,21 +154,37 @@ export class TaskService {
         const data2 = JSON.parse(await urlData2.text());
         const urlData3 = await fetch(`https://www.loteriasyapuestas.es/servicios/premioDecimoWeb?idsorteo=${gameId}`, (requestOptions as any))
         const data3 = JSON.parse(await urlData3.text());
-        return { data1, data2, data3 };
+        // Complete results, big size
+        const urlData4 = await fetch(`https://www.loteriasyapuestas.es/servicios/premioDecimoWeb?idsorteo=${gameId}`, (requestOptions as any))
+        const data4 = JSON.parse(await urlData4.text());
+        return { data1, data2, data3, data4 };
     }
 
     private async setGameData(gameData) {
-        const {data1, data2, data3} = gameData;
+        const {data1, data2, data3, data4} = gameData;
         const gameDate = (new Date(data2.fechaSorteo)).setUTCHours(0,0,0,0);
-        const gameExist = await this.gameModel.findOne({date: gameDate}).exec(); // Check if game already exists
-        const gamePrizes = this.extractPrizesFromRawDataLN(data1, data2, data3);
+        const gameExist = await this.gameModel.findOne({
+            $and: [
+                { code: ValidCodes.LOTERIA_NACIONAL },
+                { date: gameDate },
+            ]}).exec(); // Check if game already exists
+        const gamePrizes = this.extractPrizesFromRawDataLN(data1, data2, data3, data4);
+        const data4PrizeArray = data4.compruebe || [];
+        const completePrizesList = data4PrizeArray.map((item) => {
+            return {
+                number: item.decimo,
+                quantity: item.prize,
+                prizeType: item.prizeType
+            }
+        });
         
         if (gameExist) {
+            const prizes = gameExist.data?.info.prizes as LNGameDataInfoPrize[];
             if ((!gameExist.data ||
                 !gameExist.data.info ||
                 !Array.isArray(gameExist.data.info.prizes) ||
-                !gameExist.data.info.prizes.length ||
-                !gameExist.data.info.prizes[0].number) && // Sometimes get incomplete Prizes
+                !prizes.length ||
+                !prizes[0].number) && // Sometimes get incomplete Prizes
                 (gamePrizes.length)
             ) {
                 this.logger.log(`[LN]: Updating game with date ${data2.fechaSorteo} already exist. Updating game with id: ${gameExist._id}`);
@@ -183,6 +194,7 @@ export class TaskService {
                             raw: JSON.stringify(data2),
                             prizes: gamePrizes,
                             gameId: data2.drawIdSorteo || '',
+                            completePrizesListRaw: JSON.stringify(completePrizesList)
                         }
                     }
                 });
@@ -219,6 +231,7 @@ export class TaskService {
                         raw: JSON.stringify(data2),
                         prizes: gamePrizes,
                         gameId: data2.drawIdSorteo || '',
+                        completePrizesListRaw: JSON.stringify(completePrizesList)
                     }
                 }
             });
@@ -229,52 +242,65 @@ export class TaskService {
     /*
     Transform raw data to our prizes format
     */
-    private extractPrizesFromRawDataLN(data1: any, data2: any, data3: any): LNGameDataInfoPrize[] {
+    private extractPrizesFromRawDataLN(data1: any, data2: any, data3: any, data4: any): LNGameDataInfoPrize[] {
 
         let prizes: LNGameDataInfoPrize[] = [];
 
-        const primerPremio = data2.primerPremio || null;
+        if (data4.compruebe && data4.compruebe.length) {
+            const primerPremio = data4.compruebe.find(item => item.prizeType[5] === 'G');
+            const segundoPremio = data4.compruebe.find(item => item.prizeType[5] === 'Z');
+            const reintegros = [
+                data4.compruebe[data4.compruebe.length - 1],
+                data4.compruebe[data4.compruebe.length - 2],
+                data4.compruebe[data4.compruebe.length - 3],
+                data4.compruebe[data4.compruebe.length - 4]
+            ];
 
-        if (primerPremio) {
-            const prize: LNGameDataInfoPrize = {
-                number: primerPremio.decimo?.toString() || '',
-                quantity: primerPremio.prize || 0,
+            // const primerPremio = data2.primerPremio || null;
+
+            if (primerPremio) {
+                const prize: LNGameDataInfoPrize = {
+                    number: primerPremio.decimo?.toString() || '',
+                    quantity: primerPremio.prize || 0,
+                    prizeType: primerPremio.prizeType
+                }
+                prizes.push(prize);
             }
-            prizes.push(prize);
-        }
 
-        const segundoPremio = data2.segundoPremio || null;
+            // const segundoPremio = data2.segundoPremio || null;
 
-        if (segundoPremio) {
-            const prize: LNGameDataInfoPrize = {
-                number: segundoPremio.decimo?.toString() || '',
-                quantity: segundoPremio.prize || 0,
+            if (segundoPremio) {
+                const prize: LNGameDataInfoPrize = {
+                    number: segundoPremio.decimo?.toString() || '',
+                    quantity: segundoPremio.prize || 0,
+                    prizeType: segundoPremio.prizeType
+                }
+                prizes.push(prize);
             }
-            prizes.push(prize);
+
+            // const tercerosPremios = data2.tercerosPremios || [];
+            // prizes = prizes.concat(this.formatRawDataPrizeArrayLN(tercerosPremios));
+            
+            // const cuartosPremios = data2.cuartosPremios || [];
+            // prizes = prizes.concat(this.formatRawDataPrizeArrayLN(cuartosPremios));
+            
+            // const quintosPremios = data2.quintosPremios || [];
+            // prizes = prizes.concat(this.formatRawDataPrizeArrayLN(quintosPremios));
+
+            // prizes = prizes.concat(this.formatRawExtraPrizesDataLN(data3));  // Extract extra prizes data
+            
+            // const extraccionesDeCuatroCifras = data2.extraccionesDeCuatroCifras || [];
+            // prizes = prizes.concat(this.formatRawDataPrizeArrayLN(extraccionesDeCuatroCifras));
+            
+            // const extraccionesDeTresCifras = data2.extraccionesDeTresCifras || [];
+            // prizes = prizes.concat(this.formatRawDataPrizeArrayLN(extraccionesDeTresCifras));
+            
+            // const extraccionesDeDosCifras = data2.extraccionesDeDosCifras || [];
+            // prizes = prizes.concat(this.formatRawDataPrizeArrayLN(extraccionesDeDosCifras));
+
+            // const reintegros = data2.reintegros || [];
+            prizes = prizes.concat(this.formatRawDataPrizeArrayLN(reintegros));
         }
-
-        const tercerosPremios = data2.tercerosPremios || [];
-        prizes = prizes.concat(this.formatRawDataPrizeArrayLN(tercerosPremios));
-        
-        const cuartosPremios = data2.cuartosPremios || [];
-        prizes = prizes.concat(this.formatRawDataPrizeArrayLN(cuartosPremios));
-        
-        const quintosPremios = data2.quintosPremios || [];
-        prizes = prizes.concat(this.formatRawDataPrizeArrayLN(quintosPremios));
-
-        prizes = prizes.concat(this.formatRawExtraPrizesDataLN(data3));  // Extract extra prizes data
-        
-        const extraccionesDeCuatroCifras = data2.extraccionesDeCuatroCifras || [];
-        prizes = prizes.concat(this.formatRawDataPrizeArrayLN(extraccionesDeCuatroCifras));
-        
-        const extraccionesDeTresCifras = data2.extraccionesDeTresCifras || [];
-        prizes = prizes.concat(this.formatRawDataPrizeArrayLN(extraccionesDeTresCifras));
-        
-        const extraccionesDeDosCifras = data2.extraccionesDeDosCifras || [];
-        prizes = prizes.concat(this.formatRawDataPrizeArrayLN(extraccionesDeDosCifras));
-
-        const reintegros = data2.reintegros || [];
-        prizes = prizes.concat(this.formatRawDataPrizeArrayLN(reintegros));
         
         return prizes;
     }
@@ -284,13 +310,20 @@ export class TaskService {
     */
     private formatRawDataPrizeArrayLN(rawDataPrizeArray: any[]): LNGameDataInfoPrize[] {
         const prizes: LNGameDataInfoPrize[] = [];
+        const numbers: string[] = [];
         if (Array.isArray(rawDataPrizeArray) && rawDataPrizeArray.length > 0) {
             rawDataPrizeArray.forEach(el => {
-                const prize: LNGameDataInfoPrize = {
-                    number: el.decimo?.toString() || '',
-                    quantity: el.prize || 0,
+                let number = el.decimo?.toString() || '';
+                number = number[number.length - 1];
+                if (!numbers.includes(number)) {
+                    numbers.push(number);
+                    const prize: LNGameDataInfoPrize = {
+                        number,
+                        quantity: el.prize || 0,
+                        prizeType: el.prizeType
+                    }
+                    prizes.push(prize);
                 }
-                prizes.push(prize);
             });
         }
         return prizes;
@@ -361,10 +394,10 @@ export class TaskService {
                     take(1)
                 ).subscribe({
                     next: response => {
-                        this.logger.log(`[LN]: Notification to ${deviceToken} was sent: ${response.data}`);
+                        // this.logger.log(`[LN]: Notification to ${deviceToken} was sent: ${response.data}`);
                     },
                     error: error => {
-                        this.logger.error(`[LN]: Error sending notification: ${error}`);
+                        // this.logger.error(`[LN]: Error sending notification: ${error}`);
                     }
                 });
             } catch (error) {
@@ -373,6 +406,7 @@ export class TaskService {
         });
     }
 
+    // TODO: Move this to a service
     private async getPushTokensForGame(date: string, code: string): Promise<string[]> {
         const tickets = await this.ticketModel.find({ date, code }).exec();
         const ticketUserIds = tickets.map(ticket => ticket.user);
